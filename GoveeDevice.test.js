@@ -10,6 +10,7 @@ const ARM_INTERVAL_IDLE_MS = 30 * 1000;  // ...and this often once settled
 const STATUS_FRESH_MS      = 30 * 1000;  // a status reply is trusted for this long
 const STATUS_POLL_MS       = 10 * 1000;  // how often to ask for status
 const DEVICE_DATA_RETRY_MS = 10 * 1000;  // retry metadata fetch while id is unknown
+const SOCKET_RECYCLE_MS    = 20 * 1000;  // recycle a reply-less socket this often during boot
 const DEVICE_DATA_MAX_MS   = 60 * 60 * 1000;
 
 const GRADIENT_OFF_SKUS = [
@@ -93,6 +94,7 @@ export default class GoveeDevice
         this.lastStatusReply = 0;    // 0 == we have never heard from this device
         this.lastTurnOn = 0;
         this.lastRazerArm = 0;
+        this.lastSocketRecycle = 0;
         this.armedLogged = false;
     }
 
@@ -141,7 +143,13 @@ export default class GoveeDevice
 
     handleSocketError(errorId, errorMessage)
     {
-        this.log(errorMessage);
+        this.log('Device socket error: ' + errorMessage);
+
+        // A socket that has errored can be permanently dead - typical right
+        // after boot when it was created before the network stack was ready.
+        // Drop it so sendRGB rebuilds a fresh one (with the bind backoff).
+        try { if (this.udpServer) this.udpServer.close(); } catch(ex) { /* already gone */ }
+        this.udpServer = null;
     }
 
     handleListening()
@@ -579,6 +587,26 @@ export default class GoveeDevice
         {
             this.setupUdpServer();
             if (!this.udpServer) return;
+        }
+
+        // A socket created before the network was ready can also be silently
+        // dead: bound, no error event, packets going nowhere. If we have never
+        // heard a single reply and we're still in the boot window, recycle it
+        // periodically - a healthy device answers the status poll within a
+        // couple of seconds, so a fresh socket that works stops this quickly.
+        if (this.lastStatusReply === 0 && (now - this.startedAt) < BOOT_WINDOW_MS)
+        {
+            if (this.lastSocketRecycle === 0) this.lastSocketRecycle = this.startedAt;
+            if ((now - this.lastSocketRecycle) > SOCKET_RECYCLE_MS)
+            {
+                this.lastSocketRecycle = now;
+                this.log('No replies yet, recycling device socket');
+                try { if (this.udpServer) this.udpServer.close(); } catch(ex) { /* already gone */ }
+                this.udpServer = null;
+                this.lastBindAttempt = 0;
+                this.setupUdpServer();
+                if (!this.udpServer) return;
+            }
         }
 
         if (this.split == 2)

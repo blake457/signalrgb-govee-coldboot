@@ -9,7 +9,7 @@ const BIND_RETRY_MS      = 5 * 1000;
 const SOCKET_SILENCE_MS  = 60 * 1000;
 
 export function Name() { return "Govee Direct Connect (Cold Boot Fix)"; }
-export function Version() { return "2.1.4-cb1"; }
+export function Version() { return "2.1.4-cb2"; }
 export function Type() { return "network"; }
 export function Publisher() { return "RickOfficial"; }
 export function Size() { return [1, 1]; }
@@ -207,7 +207,14 @@ export function DiscoveryService()
 
     this.handleSocketError = function(err, message)
     {
-        service.log(message);
+        service.log('Discovery socket error: ' + message);
+
+        // Same treatment as the device socket: an errored socket may be dead
+        // for good, so drop it and let the retry/backoff path rebuild it.
+        try { if (this.udpServer) this.udpServer.close(); } catch(ex) { /* already gone */ }
+        this.udpServer = null;
+        this.socketStartedAt = null;
+        this.lastMessageAt = null;
     }
 
     this.handleSocketMessage = function(value)
